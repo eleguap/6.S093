@@ -1,5 +1,7 @@
 # .gitignore for social media integration project
 
+.DS_Store
+
 # Python cache
 __pycache__/
 
@@ -8,3 +10,6 @@ venv/
 
 # Environment variables
 .env
+
+# Data
+dataset.zip

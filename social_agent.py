@@ -1,8 +1,8 @@
 import os
 import requests
-import json
 from pydantic import BaseModel
 from typing import List
+import replicate
 from dotenv import load_dotenv
 
 # Load environment variables from .env file
@@ -23,6 +23,10 @@ OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY")
 OPENROUTER_API_URL = os.getenv("OPENROUTER_API_URL")
 OPENROUTER_MODEL = os.getenv("OPENROUTER_MODEL")
 OPENROUTER_STRUCTURED = False
+
+REPLICATE_API_KEY = os.getenv("REPLICATE_API_KEY")
+os.environ["REPLICATE_API_TOKEN"] = REPLICATE_API_KEY
+TRIGGER_WORD = "tr1gg3r_w0rd"
 
 # -------------------- Structured Outputs --------------------
 
@@ -248,6 +252,68 @@ def reply_to_status(status_id, text):
     resp.raise_for_status()
     return resp.json()
 
+def create_image_post(text = "*This post was AI generated.*"):
+    image_path = "my-image.webp"
+
+    try:
+        output = replicate.run(
+            "sundai-club/redbull_suzuka_livery:24b0b168263d9b15ce91d2e3eeb44958c770602c408a0c947f9d78b8d1fac737",
+            input={
+                "model": "dev",
+                "prompt": f"{TRIGGER_WORD} on track f1",
+                "go_fast": False,
+                "lora_scale": 1,
+                "megapixels": "1",
+                "num_outputs": 1,
+                "aspect_ratio": "1:1",
+                "output_format": "webp",
+                "guidance_scale": 3,
+                "output_quality": 80,
+                "prompt_strength": 0.8,
+                "extra_lora_scale": 1,
+                "num_inference_steps": 28
+            }
+        )
+
+        # Download image
+        image_url = output[0]
+        print("Image URL:", image_url)
+
+        img_resp = requests.get(image_url)
+        img_resp.raise_for_status()
+        with open(image_path, "wb") as f:
+            f.write(img_resp.content)
+
+        # Upload media to Mastodon
+        media_url = f"{MASTODON_API_URL}/api/v1/media"
+        headers = {
+            "Authorization": f"Bearer {MASTODON_ACCESS_TOKEN}"
+        }
+
+        with open(image_path, "rb") as f:
+            files = {"file": f}
+            media_resp = requests.post(media_url, headers=headers, files=files)
+            media_resp.raise_for_status()
+
+        media_id = media_resp.json()["id"]
+
+        # Create post
+        status_url = f"{MASTODON_API_URL}/api/v1/statuses"
+        payload = {
+            "status": text,
+            "media_ids[]": [media_id]
+        }
+
+        post_resp = requests.post(status_url, headers=headers, data=payload)
+        post_resp.raise_for_status()
+
+        return post_resp.json()
+
+    finally:
+        # Always delete local file
+        if os.path.exists(image_path):
+            os.remove(image_path)
+
 # -------------------- Human --------------------
 def human_approve(text):
     print("\n" + "="*60)
@@ -284,9 +350,10 @@ if __name__ == "__main__":
         print("\nWhat would you like to do?")
         print("1. Create posts from all shared pages in workspace")
         print("2. Reply to recent posts")
-        print("3. Exit")
+        print("3. Create image post")
+        print("4. Exit")
 
-        choice = input("\nEnter your choice (1, 2, or 3): ").strip()
+        choice = input("\nEnter your choice (1, 2, 3, or 4): ").strip()
 
         if choice == '1':
             all_pages = search_all_pages()
@@ -303,10 +370,16 @@ if __name__ == "__main__":
             all_pages = search_all_pages()
             reply_to_recent_posts(all_pages)
         elif choice == '3':
+            text = input("Input optional text: ")
+            if text:
+                create_image_post(text)
+            else:
+                create_image_post()
+        elif choice == '4':
             print("Exiting...")
             break
         else:
-            print("Invalid choice. Please enter 1, 2, or 3.")
+            print("Invalid choice. Please enter 1, 2, 3, or 4.")
 
     # Preview
     # for page in all_pages:
