@@ -28,94 +28,6 @@ MASTODON_ACCESS_TOKEN = os.getenv("MASTODON_ACCESS_TOKEN")
 os.environ["TELEGRAM_BOT_TOKEN"] = TELEGRAM_BOT_TOKEN
 os.environ["TELEGRAM_CHAT_ID"] = TELEGRAM_CHAT_ID
 
-# async def send_simple_message(text: str):
-#     """Send a basic text message to Telegram."""
-#     bot = Bot(token=os.environ["TELEGRAM_BOT_TOKEN"])
-#     message = await bot.send_message(
-#         chat_id=int(os.environ["TELEGRAM_CHAT_ID"]),
-#         text=text,
-#     )
-#     print(f"✅ Message sent! ID: {message.message_id}")
-#     return message
-
-# async def send_message_with_buttons(text: str):
-#     """Send a message with Approve/Reject buttons."""
-#     bot = Bot(token=os.environ["TELEGRAM_BOT_TOKEN"])
-
-#     # Create the keyboard with two buttons
-#     keyboard = InlineKeyboardMarkup([
-#         [
-#             InlineKeyboardButton("✅ Approve", callback_data="approve"),
-#             InlineKeyboardButton("❌ Reject", callback_data="reject"),
-#         ]
-#     ])
-
-#     message = await bot.send_message(
-#         chat_id=int(os.environ["TELEGRAM_CHAT_ID"]),
-#         text=text,
-#         reply_markup=keyboard,
-#     )
-#     print(f"✅ Message with buttons sent! ID: {message.message_id}")
-#     return message
-
-# async def send_custom_buttons():
-#     """Experiment with different button layouts."""
-#     bot = Bot(token=os.environ["TELEGRAM_BOT_TOKEN"])
-
-#     keyboard = InlineKeyboardMarkup([
-#         [
-#             InlineKeyboardButton("👍 Like", callback_data="like"),
-#             InlineKeyboardButton("👎 Dislike", callback_data="dislike"),
-#         ],
-#         # Add more rows here for vertical arrangement
-#         [
-#             InlineKeyboardButton("✍️ Edit", callback_data="edit"),
-#             InlineKeyboardButton("🔄 Regenerate", callback_data="regenerate"),
-#         ]
-#     ])
-
-#     await bot.send_message(
-#         chat_id=int(os.environ["TELEGRAM_CHAT_ID"]),
-#         text="Rate this content:",
-#         reply_markup=keyboard,
-#     )
-
-# async def handle_button_click(update: Update, context: ContextTypes.DEFAULT_TYPE):
-#     """Handle button clicks from Telegram."""
-#     query = update.callback_query
-#     await query.answer()  # Acknowledge the click
-
-#     action = query.data
-#     print(f"📥 Button clicked: {action}")
-
-#     if action == "approve":
-#         await query.edit_message_text("✅ APPROVED! Post will be published.")
-#     elif action == "reject":
-#         await query.edit_message_text("❌ REJECTED. Post discarded.")
-#     else:
-#         await query.edit_message_text(f"Received: {action}")
-
-# async def main():
-#     print("🚀 Starting bot... Click a button in Telegram!")
-
-#     app = Application.builder().token(os.environ["TELEGRAM_BOT_TOKEN"]).build()
-#     app.add_handler(CallbackQueryHandler(handle_button_click))
-
-#     # This blocks forever (until Ctrl+C)
-#     await app.initialize()
-#     await app.start()
-#     await app.updater.start_polling()
-
-#     try:
-#         await asyncio.Event().wait()
-#     except asyncio.CancelledError:
-#         pass
-#     finally:
-#         await app.updater.stop()
-#         await app.stop()
-#         await app.shutdown()
-#         print("\n🛑 Bot stopped.")
-
 # -------------------- Telegram --------------------
 feedback_pending_post = None
 feedback_decision = None
@@ -255,6 +167,7 @@ async def wait_for_approval(post_content: str) -> str:
     else:
         return "approve", None
 
+# -------------------- Mastodon --------------------
 def post_to_mastodon(text):
     url = f"{MASTODON_API_URL}/api/v1/statuses"
     headers = {
@@ -268,11 +181,33 @@ def post_to_mastodon(text):
     resp.raise_for_status()
     return resp.json()
 
-def post_image_to_mastodon(text):
-    url = f"{MASTODON_API_URL}/api/v1/statuses"
+def post_image_to_mastodon(text, image_path):
+    media_url = f"{MASTODON_API_URL}/api/v1/media"
     headers = {
         "Authorization": f"Bearer {MASTODON_ACCESS_TOKEN}"
     }
+
+    with open(image_path, "rb") as img_file:
+        files = {"file": img_file}
+        media_resp = requests.post(media_url, headers=headers, files=files)
+        media_resp.raise_for_status()
+        media_id = media_resp.json()["id"]
+
+    try:
+        os.remove(image_path)
+    except PermissionError:
+        print(f"Warning: Could not delete {image_path}, it may be open in another program.")
+
+    post_url = f"{MASTODON_API_URL}/api/v1/statuses"
+    data = {
+        "status": text,
+        "media_ids[]": [media_id]
+    }
+
+    resp = requests.post(post_url, headers=headers, data=data)
+    resp.raise_for_status()
+
+    return resp.json()
 
 def reply_to_status(status_id, text):
     url = f"{MASTODON_API_URL}/api/v1/statuses"
@@ -306,6 +241,7 @@ def hitl(post):
 
     elif post["type"] == "image":
         text, image_path = post["payload"]
+        print(f"\n Text: {text}")
         print(f"\n🖼️ Image ready: {image_path}")
         choice = input("Post this image? (Y/N): ").strip().lower()
         if choice == "y":
@@ -323,4 +259,5 @@ def hitl(post):
 
 if __name__ == "__main__":
     post = social_agent.generate_post()
+    # post = image_agent.generate_image_post()
     hitl(post)
