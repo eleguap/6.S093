@@ -1,5 +1,7 @@
 import os
 import replicate
+import uuid
+import requests
 from replicate.exceptions import ReplicateError
 from IPython.display import Image, display
 from dotenv import load_dotenv
@@ -71,7 +73,49 @@ def test_model(model):
     print(f"Generated image URL: {generated_img_url}")
     display(Image(url=generated_img_url))
 
+# -------------------- Mastodon --------------------
+def generate_image_post(text = ""):
+    if text:
+        text += "\n\n*This post was AI generated.*"
+    else:
+        text += "*This post was AI generated.*"
+
+    output = replicate.run(
+        "sundai-club/redbull_suzuka_livery:24b0b168263d9b15ce91d2e3eeb44958c770602c408a0c947f9d78b8d1fac737",
+        input={
+            "model": "dev",
+            "prompt": f"{TRIGGER_WORD} on track f1",
+            "go_fast": False,
+            "lora_scale": 1,
+            "megapixels": "1",
+            "num_outputs": 1,
+            "aspect_ratio": "1:1",
+            "output_format": "webp",
+            "guidance_scale": 3,
+            "output_quality": 80,
+            "prompt_strength": 0.8,
+            "extra_lora_scale": 1,
+            "num_inference_steps": 28
+        }
+    )
+
+    image_url = output[0]
+    filename = f"{uuid.uuid4()}.webp"
+    image_path = filename
+
+    resp = requests.get(image_url)
+    resp.raise_for_status()
+
+    with open(image_path, "wb") as f:
+        f.write(resp.content)
+
+    return {
+        "type": "image",
+        "payload": (text, image_path)
+    }
+
 if __name__ == "__main__":
-    model = create_or_get_model()
-    train_model(model)
+    # model = create_or_get_model()
+    # train_model(model)
     # test_model(model)
+    pass
