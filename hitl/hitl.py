@@ -1,10 +1,8 @@
 import os
-import json
 import asyncio
-import requests
-import social_agent
-import image_agent
-from pathlib import Path
+import db.posts
+import db.feedback
+from core.models import PostDraft, Post
 from telegram import Bot
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import Application, CallbackQueryHandler, ContextTypes
@@ -14,16 +12,9 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
-# Feedback filepath
-FEEDBACK_FILE = Path("feedback.json")
-
 # Telegram API Configuration
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
-
-# Mastodon API Configuration
-MASTODON_API_URL = os.getenv("MASTODON_API_URL")
-MASTODON_ACCESS_TOKEN = os.getenv("MASTODON_ACCESS_TOKEN")
 
 os.environ["TELEGRAM_BOT_TOKEN"] = TELEGRAM_BOT_TOKEN
 os.environ["TELEGRAM_CHAT_ID"] = TELEGRAM_CHAT_ID
@@ -39,7 +30,72 @@ waiting_for_edit = False
 
 feedback_done = asyncio.Event()
 
-async def wait_for_approval(post_content: str) -> str:
+async def wait_for_approval_image(img_path: str) -> tuple[str, str | None]:
+    """
+    Returns:
+      ("approve", None)
+      ("reject", None)
+    """
+    global feedback_pending_post, feedback_decision
+
+    async def handle_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
+        global feedback_decision
+
+        query = update.callback_query
+        await query.answer()
+
+        await query.edit_message_reply_markup(reply_markup=None)
+
+        if query.data == "approve":
+            feedback_decision = "approve"
+            await query.reply_text(f"✅ APPROVED\n\n")
+            feedback_done.set()
+        elif query.data == "reject":
+            feedback_decision = "reject"
+            await query.message.reply_text("❌ REJECTED\n\n")
+
+    # Reset state
+    feedback_decision = None
+    feedback_done.clear()
+
+    # Send the post with buttons
+    bot = Bot(token=os.environ["TELEGRAM_BOT_TOKEN"])
+    keyboard = InlineKeyboardMarkup([
+        [
+            InlineKeyboardButton("✅ Approve", callback_data="approve"),
+            InlineKeyboardButton("❌ Reject", callback_data="reject"),
+        ]
+    ])
+
+    bot = Bot(token=os.environ["TELEGRAM_BOT_TOKEN"])
+    caption_text = "📝 New Post for Approval"
+    await bot.send_photo(
+        chat_id=int(os.environ["TELEGRAM_CHAT_ID"]),
+        photo=open(img_path, "rb"),
+        caption=caption_text,
+        reply_markup=keyboard
+    )
+
+    # Set up the listener
+    app = Application.builder().token(os.environ["TELEGRAM_BOT_TOKEN"]).build()
+    app.add_handler(CallbackQueryHandler(handle_button))
+
+    await app.initialize()
+    await app.start()
+    await app.updater.start_polling()
+
+    # Wait for completion
+    await feedback_done.wait()
+
+    # Cleanup
+    await app.updater.stop()
+    await app.stop()
+    await app.shutdown()
+
+    return feedback_decision, None
+
+
+async def wait_for_approval_text(post_content: str, parent_text = str | None) -> tuple[str, str | None]:
     """
     Returns:
       ("approve", None)
@@ -81,7 +137,6 @@ async def wait_for_approval(post_content: str) -> str:
             )
             await query.message.reply_text(feedback_pending_post)
 
-
     async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         global feedback_reason, feedback_edited_post
         global waiting_for_reason, waiting_for_edit
@@ -90,24 +145,12 @@ async def wait_for_approval(post_content: str) -> str:
 
         if waiting_for_reason:
             feedback_reason = text
-
-            if FEEDBACK_FILE.exists() and FEEDBACK_FILE.stat().st_size > 0:
-                with open(FEEDBACK_FILE, "r") as f:
-                    data = json.load(f)
-            else:
-                data = {}
-
-            key = feedback_reason.lower().strip()
-            data[key] = data.get(key, 0) + 1
-
-            with open(FEEDBACK_FILE, "w") as f:
-                json.dump(data, f, indent=2)
-
             waiting_for_reason = False
             await update.message.reply_text(
                 f"📝 Feedback recorded!\n\nReason: {feedback_reason}"
             )
             feedback_done.set()
+
         elif waiting_for_edit:
             feedback_edited_post = text
             waiting_for_edit = False
@@ -136,12 +179,16 @@ async def wait_for_approval(post_content: str) -> str:
         ]
     ])
 
+    message_text = f"📝 New Post for Approval\n\n{post_content}\n\n"
+    if parent_text:
+        message_text += f"Parent Post: {parent_text}\n\n"
+
+    message_text += f"Characters: {len(post_content)}"
     await bot.send_message(
         chat_id=int(os.environ["TELEGRAM_CHAT_ID"]),
-        text=f"📝 New Post for Approval\n\n{post_content}\n\nCharacters: {len(post_content)}",
+        text=message_text,
         reply_markup=keyboard,
     )
-    print("📱 Sent to Telegram. Waiting for approval...")
 
     # Set up the listener
     app = Application.builder().token(os.environ["TELEGRAM_BOT_TOKEN"]).build()
@@ -167,97 +214,26 @@ async def wait_for_approval(post_content: str) -> str:
     else:
         return "approve", None
 
-# -------------------- Mastodon --------------------
-def post_to_mastodon(text):
-    url = f"{MASTODON_API_URL}/api/v1/statuses"
-    headers = {
-        "Authorization": f"Bearer {MASTODON_ACCESS_TOKEN}"
-    }
-    payload = {
-        "status": text
-    }
+def hitl(post: PostDraft) -> Post:
+    post_id = db.posts.create_post(post, status="pending")
 
-    resp = requests.post(url, headers=headers, data=payload)
-    resp.raise_for_status()
-    return resp.json()
-
-def post_image_to_mastodon(text, image_path):
-    media_url = f"{MASTODON_API_URL}/api/v1/media"
-    headers = {
-        "Authorization": f"Bearer {MASTODON_ACCESS_TOKEN}"
-    }
-
-    with open(image_path, "rb") as img_file:
-        files = {"file": img_file}
-        media_resp = requests.post(media_url, headers=headers, files=files)
-        media_resp.raise_for_status()
-        media_id = media_resp.json()["id"]
-
-    try:
-        os.remove(image_path)
-    except PermissionError:
-        print(f"Warning: Could not delete {image_path}, it may be open in another program.")
-
-    post_url = f"{MASTODON_API_URL}/api/v1/statuses"
-    data = {
-        "status": text,
-        "media_ids[]": [media_id]
-    }
-
-    resp = requests.post(post_url, headers=headers, data=data)
-    resp.raise_for_status()
-
-    return resp.json()
-
-def reply_to_status(status_id, text):
-    url = f"{MASTODON_API_URL}/api/v1/statuses"
-    headers = {
-        "Authorization": f"Bearer {MASTODON_ACCESS_TOKEN}"
-    }
-    payload = {
-        "status": text,
-        "in_reply_to_id": status_id
-    }
-
-    resp = requests.post(url, headers=headers, data=payload)
-    resp.raise_for_status()
-    return resp.json()
-
-def hitl(post):
-    if post["type"] == "post":
-        text = post["payload"]
-
-        decision, payload = asyncio.run(wait_for_approval(text))
-
-        print(f"\n📊 Result: {decision}")
+    if post.type in ["text", "reply"]:
+        decision, payload = asyncio.run(wait_for_approval_text(post.original_content, post.metadata.get("parent_text")))
         if decision == "approve":
-            post_to_mastodon(text)
-        elif decision == "reject" and payload:
-            print(f"\n💡 Feedback to improve the prompt:")
-            print(f"   The human said: '{payload}'")
-            print(f"   Consider adjusting your prompt to avoid this issue.")
+            db.posts.update_status(post_id, "approved")
+        elif decision == "reject":
+            db.feedback.create_feedback(post_id=post_id, decision="reject", reason=payload, content=post.original_content)
+            db.posts.update_status(post_id, "rejected")
         elif decision == "edit":
-            print("New post:", payload)
+            # Update final_content
+            db.posts.update_status(post_id, "edited")
 
-    elif post["type"] == "image":
-        text, image_path = post["payload"]
-        print(f"\n Text: {text}")
-        print(f"\n🖼️ Image ready: {image_path}")
-        choice = input("Post this image? (Y/N): ").strip().lower()
-        if choice == "y":
-            post_image_to_mastodon(text, image_path)
+    elif post.type == "image":
+        decision, _ = asyncio.run(wait_for_approval_image(post.image_path))
 
-    elif post["type"] == "replies":
-        statuses, replies = post["payload"]
-        for status, reply in zip(statuses, replies):
-            print(f"\n💬 Original post: {status['content']}")
-            print(f"Suggested reply: {reply}")
-            choice = input("Send this reply? (Y/N): ").strip().lower()
-            if choice == "y":
-                reply_to_status(status["id"], reply)
+        if decision == "approve":
+            db.posts.update_status(post_id, "approved")
+        elif decision == "reject":
+            db.posts.update_status(post_id, "rejected")
 
-
-if __name__ == "__main__":
-    post = social_agent.generate_post()
-    # post = image_agent.generate_image_post()
-    hitl(post)
+    return db.posts.get_post(post_id)
