@@ -1,22 +1,118 @@
-import fastapi
-import uvicorn
+import os
+import re
+import httpx
+import asyncio
 import db.schema
+import db.notion
+import db.state
 import db.posts
 import db.feedback
+from db.triggers import get_pending_triggers, mark_trigger_processed
 import generation.text
 import generation.image
 import generation.replies
+import generation.reply
 import hitl.hitl
 import posting.post
 
-from fastapi import HTTPException
+from fastapi import FastAPI, HTTPException
+from contextlib import asynccontextmanager
 from pydantic import BaseModel
 from typing import Optional
+from dotenv import load_dotenv
 
-app = fastapi.FastAPI(title="Social Media Agent API")
+# Load environment variables from .env file
+load_dotenv()
+
+# Mastodon API Configuration
+MASTODON_API_URL = os.getenv("MASTODON_API_URL")
+MASTODON_ACCESS_TOKEN = os.getenv("MASTODON_ACCESS_TOKEN")
 
 # Initialize database
 db.schema.init_db()
+
+# -------------------- Notion Polling --------------------
+async def sync_notion_loop():
+    while True:
+        db.notion.sync_notion()
+        await asyncio.sleep(15 * 60)
+
+async def process_notion_triggers_loop():
+    while True:
+        triggers = get_pending_triggers()
+
+        if not triggers:
+            await asyncio.sleep(15 * 60)
+            continue
+
+        additions = [t["diff"] for t in triggers]
+
+        draft = generation.text.generate_post(additions)
+        post = hitl.hitl(draft)
+        if post.status != "rejected":
+            posting.post(post)
+
+        for t in triggers:
+            mark_trigger_processed(t["id"])
+
+        await asyncio.sleep(15 * 60)
+
+# -------------------- Mastodon Polling --------------------
+def strip_html(html):
+    return re.sub("<.*?>", "", html)
+
+async def handle_mention(notification, client):
+    status = notification["status"]
+
+    reply_text = generation.reply.generate_reply(status)
+    if reply_text is None:
+        return
+    post = hitl.hitl(reply_text)
+    posting.post(post)
+
+last_seen_id = db.state.get("mastodon_last_seen")
+async def poll_mastodon():
+    global last_seen_id
+    headers = {"Authorization": f"Bearer {MASTODON_ACCESS_TOKEN}"}
+
+    async with httpx.AsyncClient() as client:
+        while True:
+            params = {}
+            if last_seen_id:
+                params["since_id"] = last_seen_id
+
+            r = await client.get(
+                f"{MASTODON_API_URL}/api/v1/notifications",
+                headers=headers,
+                params=params
+            )
+            notifs = r.json()
+
+            for n in reversed(notifs):
+                last_seen_id = n["id"]
+                db.state.set("mastodon_last_seen", last_seen_id)
+
+                if n["type"] == "mention":
+                    await handle_mention(n, client)
+
+            await asyncio.sleep(15)
+
+# -------------------- Lifespan --------------------
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    mastodon_task = asyncio.create_task(poll_mastodon())
+    notion_sync_task = asyncio.create_task(sync_notion_loop())
+    trigger_task = asyncio.create_task(process_notion_triggers_loop())
+    yield
+    mastodon_task.cancel()
+    notion_sync_task.cancel()
+    trigger_task.cancel()
+
+# -------------------- App --------------------
+app = FastAPI(
+    title="Social Media Agent API",
+    lifespan=lifespan
+)
 
 # -------------------- Pydantic Models --------------------
 class FeedbackRequest(BaseModel):
@@ -89,7 +185,6 @@ async def generate_post():
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
-
 # -------------------- Image Endpoints --------------------
 @app.post("/image/generate")
 async def generate_post():
@@ -157,12 +252,3 @@ async def get_feedback(post_id: int):
     feedback = db.feedback.get_feedback(post_id)
 
     return feedback
-
-# -------------------- Stats Endpoints --------------------
-@app.get("/stats/feedback")
-async def get_feedback_stats():
-    """Get feedback statistics"""
-
-    return {
-        "result": "unimplemented"
-    }

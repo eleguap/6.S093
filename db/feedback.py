@@ -2,14 +2,7 @@ import os
 import sqlite3
 import datetime
 from core.models import Feedback
-from dotenv import load_dotenv
-
-# Load environment variables from .env file
-load_dotenv()
-DB_FILE = os.getenv("DB_FILE")
-
-def get_connection():
-    return sqlite3.connect(DB_FILE)
+from db.schema import get_connection
 
 def create_feedback(post_id, decision, reason, content):
     conn = get_connection()

@@ -11,9 +11,10 @@ class MastodonPost(BaseModel):
     post_text: str
 
 # -------------------- Mastodon --------------------
-def generate_post():
-    all_pages = search_all_pages()
-    corpus = collapse_pages(all_pages)
+def generate_post(corpus = ""):
+    if not corpus:
+        all_pages = search_all_pages()
+        corpus = collapse_pages(all_pages)
 
     prompt = f"""
         You are a social media assistant.

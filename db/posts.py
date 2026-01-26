@@ -2,14 +2,7 @@ import os
 import sqlite3
 from datetime import datetime, timezone
 from core.models import PostDraft, Post
-from dotenv import load_dotenv
-
-# Load environment variables from .env file
-load_dotenv()
-DB_FILE = os.getenv("DB_FILE")
-
-def get_connection():
-    return sqlite3.connect(DB_FILE)
+from db.schema import get_connection
 
 def create_post(draft: PostDraft, status: str = "generated") -> int:
     conn = get_connection()

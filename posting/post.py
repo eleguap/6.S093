@@ -37,7 +37,9 @@ def post_to_mastodon(post: Post):
             media_resp.raise_for_status()
             media_id = media_resp.json()["id"]
 
-        gcs_url = upload_image_to_gcloud(post.image_path, os.path.basename(post.image_path))
+        gcs_url = upload_image_to_gcloud(
+            post.image_path, os.path.basename(post.image_path)
+        )
         post.img_url = gcs_url
         db.posts.update_post_img_url(post.id, gcs_url)
 
@@ -46,14 +48,34 @@ def post_to_mastodon(post: Post):
         except PermissionError:
             pass
 
+    # ----------------- Reply logic -----------------
+    in_reply_to_id = None
+    if post.type == "reply":
+        parent = db.posts.get_post(post.parent_post_id)
+        if not parent or not parent.mastodon_status_id:
+            raise ValueError("Cannot reply: parent post not found or not posted")
+
+        in_reply_to_id = parent.mastodon_status_id
+    # ------------------------------------------------
+
     post_url = f"{MASTODON_API_URL}/api/v1/statuses"
     payload = {
         "status": post.final_content or post.original_content
     }
+
     if media_id:
         payload["media_ids[]"] = [media_id]
+
+    if in_reply_to_id:
+        payload["in_reply_to_id"] = in_reply_to_id
+
     response = requests.post(post_url, headers=headers, data=payload)
     response.raise_for_status()
-    db.posts.update_post_posted_at(post.id)
 
-    return response.json()
+    data = response.json()
+
+    # Persist Mastodon ID for future replies
+    db.posts.update_post_posted_at(post.id)
+    db.posts.update_post_mastodon_id(post.id, data["id"])
+
+    return data

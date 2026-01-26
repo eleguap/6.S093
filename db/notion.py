@@ -1,6 +1,9 @@
 import os
 import re
+import hashlib
 import requests
+from db.schema import get_connection
+from db.embedding import generate_embeddings_batch
 from dotenv import load_dotenv
 
 # Load environment variables from .env file
@@ -11,6 +14,13 @@ NOTION_API_URL = os.getenv("NOTION_API_URL")
 NOTION_TOKEN = os.getenv("NOTION_TOKEN")
 NOTION_VERSION = "2022-06-28"
 API_BASE = "https://api.notion.com/v1"
+
+# Global variables
+DIFF_THRESHOLD = 0.25
+
+# -------------------- Hash --------------------
+def content_hash(text: str) -> str:
+    return hashlib.sha256(text.encode("utf-8")).hexdigest()
 
 # -------------------- Notion --------------------
 def search_all_pages():
@@ -90,15 +100,7 @@ def read_page_as_text(page_id):
     lines = [block_to_text(b) for b in blocks]
     return "\n".join(l for l in lines if l.strip())
 
-def collapse_pages(all_pages):
-    texts = []
-    for page in all_pages:
-        text = read_page_as_text(page["id"])
-        if text.strip():
-            texts.append(text)
-    return "\n\n".join(texts)
-
-def chunk_document(content: str, filename: str, max_chars: int = 3500, overlap: int = 500):
+def chunk_document(content: str, filename: str, page_id: str, max_chars: int = 3500, overlap: int = 500):
     sections = re.split(r"\n{2,}", content)
 
     chunks = []
@@ -138,7 +140,7 @@ def chunk_document(content: str, filename: str, max_chars: int = 3500, overlap: 
         results.append({
             "content": text,
             "source_type": f"notion_page",
-            "source_id": f"{filename}::chunk_{i}",
+            "source_id": f"{page_id}::chunk_{i}",
             "metadata": {
                 "source": filename,
                 "chunk_index": i,
@@ -153,10 +155,13 @@ def chunk_all_pages(all_pages):
 
     for page in all_pages:
         page_id = page["id"]
-        title = page["properties"]["title"]["title"][0]["plain_text"]
+        title = ""
+        title_prop = page.get("properties", {}).get("title", {}).get("title", [])
+        if title_prop:
+            title = title_prop[0].get("plain_text", "")
 
         text = read_page_as_text(page_id)
-        chunks = chunk_document(text, filename=title)
+        chunks = chunk_document(text, filename=title, page_id=page_id)
 
         for c in chunks:
             c["metadata"]["page_id"] = page_id
@@ -165,3 +170,55 @@ def chunk_all_pages(all_pages):
         all_chunks.extend(chunks)
 
     return all_chunks
+
+def sync_notion():
+    pages = search_all_pages()
+    chunks = chunk_all_pages(pages)
+
+    conn = get_connection()
+    cur = conn.cursor()
+
+    # Filter new or updated chunks
+    to_embed = []
+
+    for chunk in chunks:
+        sid = chunk["source_id"]
+        content = chunk["content"]
+        new_hash = content_hash(content)
+
+        cur.execute(
+            "SELECT content_hash, last_content FROM notion_chunks WHERE source_id = ?",
+            (sid,)
+        )
+        row = cur.fetchone()
+
+        if row is None:
+            # New chunk
+            cur.execute(
+                "INSERT INTO notion_chunks (source_id, content_hash, last_content) VALUES (?, ?, ?)",
+                (sid, new_hash, content)
+            )
+
+            cur.execute(
+                "INSERT INTO notion_triggers (source_id, diff, change_score) VALUES (?, ?, ?)",
+                (sid, content, 1.0)
+            )
+
+            to_embed.append(chunk)
+        else:
+            old_hash = row
+            if old_hash == new_hash:
+                continue  # No change
+            # Update canonical record
+            cur.execute(
+                "UPDATE notion_chunks SET content_hash=?, last_content=?, updated_at=CURRENT_TIMESTAMP WHERE source_id=?",
+                (new_hash, content, sid)
+            )
+            to_embed.append(chunk)
+
+    conn.commit()
+    conn.close()
+
+    # Generate and save embeddings for all new/updated chunks
+    if to_embed:
+        generate_embeddings_batch(to_embed)
